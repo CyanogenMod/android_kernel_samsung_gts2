@@ -372,7 +372,7 @@ struct fimg2d_scale {
 };
 
 struct fimg2d_clip {
-	bool enable;
+	__u32 enable;
 	int x1;
 	int y1;
 	int x2;	/* x1 + width */
@@ -426,7 +426,7 @@ struct fimg2d_image {
 struct fimg2d_param {
 	unsigned long solid_color;
 	unsigned char g_alpha;
-	bool dither;
+	__u32 dither;
 	enum rotation rotate;
 	enum premultiplied premult;
 	struct fimg2d_scale scaling;
@@ -536,7 +536,7 @@ struct fimg2d_control {
 	struct device *dev;
 	struct resource *mem;
 	void __iomem *regs;
-	bool boost;
+	__u32 boost;
 
 	atomic_t drvact;
 	atomic_t suspended;
