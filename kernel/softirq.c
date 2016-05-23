@@ -26,10 +26,13 @@
 #include <linux/smpboot.h>
 #include <linux/tick.h>
 
+#include <mach/exynos-ss.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/irq.h>
 
 #include <asm/irq.h>
+
+#include <linux/sec_debug.h>
 /*
    - No shared variables, all the data are CPU local.
    - If a softirq needs serialization, let it serialize itself
@@ -207,14 +210,14 @@ EXPORT_SYMBOL(local_bh_enable_ip);
  * we want to handle softirqs as soon as possible, but they
  * should not be able to lock up the box.
  */
-#define MAX_SOFTIRQ_TIME  msecs_to_jiffies(2)
+#define MAX_SOFTIRQ_TIME  2 * NSEC_PER_MSEC
 #define MAX_SOFTIRQ_RESTART 10
 
 asmlinkage void __do_softirq(void)
 {
 	struct softirq_action *h;
 	__u32 pending;
-	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
+	unsigned long long end = local_clock() + MAX_SOFTIRQ_TIME;
 	int cpu;
 	unsigned long old_flags = current->flags;
 	int max_restart = MAX_SOFTIRQ_RESTART;
@@ -246,12 +249,26 @@ restart:
 		if (pending & 1) {
 			unsigned int vec_nr = h - softirq_vec;
 			int prev_count = preempt_count();
+#ifdef CONFIG_SEC_DEBUG_RT_THROTTLE_ACTIVE
+			unsigned long long start_time, end_time;
 
+			start_time = sec_debug_clock();
+#endif
 			kstat_incr_softirqs_this_cpu(vec_nr);
 
 			trace_softirq_entry(vec_nr);
+			exynos_ss_softirq(ESS_FLAG_SOFTIRQ, h->action, irqs_disabled(), ESS_FLAG_IN);
+			sec_debug_softirq_log(9999, h->action, 7);
 			h->action(h);
+			exynos_ss_softirq(ESS_FLAG_SOFTIRQ, h->action, irqs_disabled(), ESS_FLAG_OUT);
+			sec_debug_softirq_log(9999, h->action, 8);
 			trace_softirq_exit(vec_nr);
+#ifdef CONFIG_SEC_DEBUG_RT_THROTTLE_ACTIVE
+			end_time = sec_debug_clock();
+			if (start_time + 950000000 < end_time) {
+				sec_debug_aux_log(SEC_DEBUG_AUXLOG_IRQ, "S:%llu %pf", start_time, h->action);
+			}
+#endif
 			if (unlikely(prev_count != preempt_count())) {
 				printk(KERN_ERR "huh, entered softirq %u %s %p"
 				       "with preempt_count %08x,"
@@ -271,7 +288,7 @@ restart:
 
 	pending = local_softirq_pending();
 	if (pending) {
-		if (time_before(jiffies, end) && !need_resched() &&
+		if ((end > local_clock()) && !need_resched() &&
 		    --max_restart)
 			goto restart;
 
@@ -478,9 +495,26 @@ static void tasklet_action(struct softirq_action *a)
 
 		if (tasklet_trylock(t)) {
 			if (!atomic_read(&t->count)) {
+#ifdef CONFIG_SEC_DEBUG_RT_THROTTLE_ACTIVE
+				unsigned long long start_time, end_time;
+
+				start_time = sec_debug_clock();
+#endif
 				if (!test_and_clear_bit(TASKLET_STATE_SCHED, &t->state))
 					BUG();
+				exynos_ss_softirq(ESS_FLAG_SOFTIRQ_TASKLET,
+							t->func, irqs_disabled(), ESS_FLAG_IN);
+				sec_debug_softirq_log(9997, t->func, 7);
 				t->func(t->data);
+				exynos_ss_softirq(ESS_FLAG_SOFTIRQ_TASKLET,
+							t->func, irqs_disabled(), ESS_FLAG_OUT);
+				sec_debug_softirq_log(9997, t->func, 8);
+#ifdef CONFIG_SEC_DEBUG_RT_THROTTLE_ACTIVE
+				end_time = sec_debug_clock();
+				if (start_time + 950000000 < end_time) {
+					sec_debug_aux_log(SEC_DEBUG_AUXLOG_IRQ, "T:%llu %pf", start_time, t->func);
+				}
+#endif
 				tasklet_unlock(t);
 				continue;
 			}
@@ -513,9 +547,26 @@ static void tasklet_hi_action(struct softirq_action *a)
 
 		if (tasklet_trylock(t)) {
 			if (!atomic_read(&t->count)) {
+#ifdef CONFIG_SEC_DEBUG_RT_THROTTLE_ACTIVE
+				unsigned long long start_time, end_time;
+
+				start_time = sec_debug_clock();
+#endif
 				if (!test_and_clear_bit(TASKLET_STATE_SCHED, &t->state))
 					BUG();
+				exynos_ss_softirq(ESS_FLAG_SOFTIRQ_HI_TASKLET,
+							t->func, irqs_disabled(), ESS_FLAG_IN);
+				sec_debug_softirq_log(9998, t->func, 7);
 				t->func(t->data);
+				exynos_ss_softirq(ESS_FLAG_SOFTIRQ_HI_TASKLET,
+							t->func, irqs_disabled(), ESS_FLAG_OUT);
+				sec_debug_softirq_log(9998, t->func, 8);
+#ifdef CONFIG_SEC_DEBUG_RT_THROTTLE_ACTIVE
+				end_time = sec_debug_clock();
+				if (start_time + 950000000 < end_time) {
+					sec_debug_aux_log(SEC_DEBUG_AUXLOG_IRQ, "TH:%llu %pf", start_time, t->func);
+				}
+#endif
 				tasklet_unlock(t);
 				continue;
 			}

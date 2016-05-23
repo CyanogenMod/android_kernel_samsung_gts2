@@ -22,6 +22,7 @@
 #include <trace/events/power.h>
 
 #include "cpuidle.h"
+#include <mach/exynos-ss.h>
 
 DEFINE_PER_CPU(struct cpuidle_device *, cpuidle_devices);
 DEFINE_PER_CPU(struct cpuidle_device, cpuidle_dev);
@@ -81,11 +82,14 @@ int cpuidle_enter_state(struct cpuidle_device *dev, struct cpuidle_driver *drv,
 	ktime_t time_start, time_end;
 	s64 diff;
 
+	exynos_ss_cpuidle(index, 0, 0, ESS_FLAG_IN);
 	time_start = ktime_get();
 
 	entered_state = target_state->enter(dev, drv, index);
 
 	time_end = ktime_get();
+	exynos_ss_cpuidle(index, entered_state,
+		(int)ktime_to_us(ktime_sub(time_end, time_start)), ESS_FLAG_OUT);
 
 	local_irq_enable();
 
@@ -146,6 +150,13 @@ int cpuidle_idle_call(void)
 
 	trace_cpu_idle_rcuidle(next_state, dev->cpu);
 
+	if (need_resched()) {
+		dev->last_residency = 0;
+		local_irq_enable();
+		entered_state = next_state;
+		goto exit;
+	}
+
 	if (drv->states[next_state].flags & CPUIDLE_FLAG_TIMER_STOP)
 		clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_ENTER,
 				   &dev->cpu);
@@ -160,6 +171,7 @@ int cpuidle_idle_call(void)
 		clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_EXIT,
 				   &dev->cpu);
 
+exit:
 	trace_cpu_idle_rcuidle(PWR_EVENT_EXIT, dev->cpu);
 
 	/* give the governor an opportunity to reflect on the outcome */

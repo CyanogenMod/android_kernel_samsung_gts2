@@ -17,7 +17,7 @@ config SECURITY_DMESG_RESTRICT
 	  unless the dmesg_restrict sysctl is explicitly set to (1).
 
 	  If you are unsure how to answer this question, answer N.
-
+	  
 config SECURITY
 	bool "Enable different security models"
 	depends on SYSFS
@@ -124,6 +124,7 @@ source security/apparmor/Kconfig
 source security/yama/Kconfig
 
 source security/integrity/Kconfig
+source security/tz_iccc/Kconfig
 
 choice
 	prompt "Default security module"

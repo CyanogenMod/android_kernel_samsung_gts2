@@ -60,6 +60,11 @@
 #include <linux/page-debug-flags.h>
 #include <linux/hugetlb.h>
 #include <linux/sched/rt.h>
+#ifdef CONFIG_PTRACK_DEBUG
+#include <linux/stacktrace.h>
+#include <linux/debugfs.h>
+#include <linux/seq_file.h>
+#endif
 
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
@@ -112,6 +117,217 @@ unsigned long dirty_balance_reserve __read_mostly;
 
 int percpu_pagelist_fraction;
 gfp_t gfp_allowed_mask __read_mostly = GFP_BOOT_MASK;
+
+static unsigned int boot_mode = 0;
+static int __init setup_bootmode(char *str)
+{
+	printk("%s: boot_mode is %u\n", __func__, boot_mode);
+	if (get_option(&str, &boot_mode)) {
+		printk("%s: boot_mode is %u\n", __func__, boot_mode);
+		return 0;
+	}
+
+	return -EINVAL;
+}
+early_param("bootmode", setup_bootmode);
+
+#ifdef CONFIG_PTRACK_DEBUG
+
+static int ptrack_init_on;
+static struct ptrack **ptrack_cache;
+static unsigned ptrack_cache_table_size;
+
+#ifdef CONFIG_BUFFERED_PTRACK
+static int ptrack_log_count;
+
+#define PTRACK_LOG_COUNT (3)
+#endif
+#define PTRACK_MEGA_BYTES (1<<20)
+#define PTRACK_MEGA_PAGE_ORDERS (8)
+#ifdef CONFIG_BUFFERED_PTRACK
+#define PTRACK_CACHE_ENTRY_NUM (PTRACK_MEGA_BYTES/(sizeof(struct ptrack) * PTRACK_ITEM_NUM * PTRACK_LOG_COUNT))
+#else
+#define PTRACK_CACHE_ENTRY_NUM (PTRACK_MEGA_BYTES/(sizeof(struct ptrack) * PTRACK_ITEM_NUM))
+#endif
+#define PTRACK_CEIL(a, b) ((a + b - 1) / b)
+
+void __init ptrack_init(void)
+{
+	unsigned low_memory = (unsigned)high_memory - (unsigned)PAGE_OFFSET;
+	unsigned low_memory_pages = PTRACK_CEIL(low_memory, PAGE_SIZE);
+	int i;
+
+	ptrack_cache_table_size = PTRACK_CEIL(low_memory_pages, PTRACK_CACHE_ENTRY_NUM);
+	ptrack_cache = kzalloc(sizeof(void *) * ptrack_cache_table_size, GFP_KERNEL);
+
+	if (!ptrack_cache)
+		return;
+
+	for (i = 0; i < ptrack_cache_table_size; i++) {
+		struct page *p;
+		p = alloc_pages(GFP_KERNEL, PTRACK_MEGA_PAGE_ORDERS);
+		if (!p)
+			goto err;
+
+		ptrack_cache[i] = (struct ptrack *)page_address(p);
+		if (!ptrack_cache[i])
+			goto err;
+	}
+
+	ptrack_init_on = 1;
+#ifdef CONFIG_BUFFERED_PTRACK
+	ptrack_log_count = PTRACK_LOG_COUNT;
+#endif
+
+	pr_info("%s: ptrack table size(%d)\n", __func__, ptrack_cache_table_size);
+
+	return;
+
+err:
+	for (i=0; i < ptrack_cache_table_size; i++) {
+		struct page *p;
+		if (!ptrack_cache[i])
+			continue;
+
+		p = virt_to_page(ptrack_cache[i]);
+		__free_pages(p, PTRACK_MEGA_PAGE_ORDERS);
+	}
+
+	kfree(ptrack_cache);
+
+	pr_info("%s: ptrack error\n", __func__);
+}
+
+#ifdef CONFIG_BUFFERED_PTRACK
+static void ptrack_move_next(struct page *page, enum ptrack_item alloc)
+{
+	page->ptrack_curr[alloc]++;
+
+	if (page->ptrack_curr[alloc] >= PTRACK_LOG_COUNT) {
+		page->ptrack_curr[alloc] = 0;
+	}
+}
+#endif
+
+static int ptrack_check_target(struct page *page)
+{
+	if (!page)
+		return 0;
+
+	if ((unsigned)page_to_phys(page) < (unsigned)virt_to_phys((void *)PAGE_OFFSET) ||
+		(unsigned)page_to_phys(page) > (unsigned)virt_to_phys((void *)high_memory))
+		return 0;
+
+	return 1;
+}
+
+static struct ptrack *_ptrack_alloc(struct page *page)
+{
+	int index;
+	int cache_idx;
+	int cache_offset;
+
+	if (!ptrack_init_on || page->ptrack)
+		return NULL;
+
+	index = ((unsigned)page_to_phys(page) - (unsigned)virt_to_phys((void *)PAGE_OFFSET)) / PAGE_SIZE;
+	cache_idx = index / PTRACK_CACHE_ENTRY_NUM;
+#ifdef CONFIG_BUFFERED_PTRACK
+	cache_offset = (index % PTRACK_CACHE_ENTRY_NUM) * PTRACK_ITEM_NUM * PTRACK_LOG_COUNT;
+#else
+	cache_offset = (index % PTRACK_CACHE_ENTRY_NUM) * PTRACK_ITEM_NUM;
+#endif
+
+	page->ptrack = &ptrack_cache[cache_idx][cache_offset];
+
+#ifdef CONFIG_BUFFERED_PTRACK
+	memset(page->ptrack, 0x00, sizeof(struct ptrack) * PTRACK_ITEM_NUM * PTRACK_LOG_COUNT);
+	page->ptrack_curr[PTRACK_ALLOC] = 0;
+	page->ptrack_curr[PTRACK_FREE] = 0;
+#else
+	memset(page->ptrack, 0x00, sizeof(struct ptrack) * PTRACK_ITEM_NUM);
+#endif
+
+	return page->ptrack;
+}
+
+static struct ptrack *ptrack_get(struct page *page, enum ptrack_item alloc)
+{
+	struct ptrack *p;
+	int curr;
+
+	p = page->ptrack;
+
+	if (!p)
+		return NULL;
+
+#ifdef CONFIG_BUFFERED_PTRACK
+	/*
+		ptrack of a page :
+			(ptrack * PTRACK_LOG_COUNT for PTRACK_ALLOC) +
+			(ptrack * PTRACK_LOG_COUNT for PTRACK_FREE)
+	# of ptrack for a page is (PTRACK_ITEM_NUM * PTRACK_LOG_COUNT)
+	 */
+	curr = page->ptrack_curr[alloc];
+	if (alloc == PTRACK_FREE) {
+		curr += PTRACK_LOG_COUNT;
+	}
+#else
+	curr = alloc;
+#endif
+	return p + curr;
+}
+
+static void _ptrack_set(struct ptrack *p, unsigned long addr)
+{
+#ifdef CONFIG_STACKTRACE
+	struct stack_trace trace;
+	int i;
+
+	trace.nr_entries = 0;
+	trace.max_entries = PTRACK_ADDRS_COUNT;
+	trace.entries = p->addrs;
+	trace.skip = 3;
+	save_stack_trace(&trace);
+
+	/* See rant in lockdep.c */
+	if (trace.nr_entries != 0 &&
+	    trace.entries[trace.nr_entries - 1] == ULONG_MAX)
+		trace.nr_entries--;
+
+	for (i = trace.nr_entries; i < PTRACK_ADDRS_COUNT; i++)
+		p->addrs[i] = 0;
+#endif
+	p->addr = addr;
+	preempt_disable();
+	p->cpu = smp_processor_id();
+	preempt_enable();
+	p->pid = current->pid;
+	p->when = cpu_clock(0);
+}
+
+static void ptrack_set(struct page *page,
+			enum ptrack_item alloc, unsigned long addr)
+{
+	struct ptrack *p = ptrack_get(page, alloc);
+
+	if (!p)
+		p = _ptrack_alloc(page);
+
+	if (!p)
+		return;
+
+	if (addr) {
+#ifdef CONFIG_BUFFERED_PTRACK
+		ptrack_move_next(page, alloc);
+#endif
+		p = ptrack_get(page, alloc);
+		_ptrack_set(p, addr);
+	}
+}
+
+#endif /* CONFIG_PTRACK_DEBUG */
+
 
 #ifdef CONFIG_PM_SLEEP
 /*
@@ -196,7 +412,20 @@ static char * const zone_names[MAX_NR_ZONES] = {
 	 "Movable",
 };
 
+/*
+ * Try to keep at least this much lowmem free.  Do not allow normal
+ * allocations below this point, only high priority ones. Automatically
+ * tuned according to the amount of memory in the system.
+ */
 int min_free_kbytes = 1024;
+int min_free_order_shift = 1;
+
+/*
+ * Extra memory for the system to try freeing. Used to temporarily
+ * free memory, to make space for new workloads. Anyone can allocate
+ * down to the min watermarks controlled by min_free_kbytes above.
+ */
+int extra_free_kbytes = 0;
 
 static unsigned long __meminitdata nr_kernel_pages;
 static unsigned long __meminitdata nr_all_pages;
@@ -360,9 +589,11 @@ void prep_compound_page(struct page *page, unsigned long order)
 	__SetPageHead(page);
 	for (i = 1; i < nr_pages; i++) {
 		struct page *p = page + i;
-		__SetPageTail(p);
 		set_page_count(p, 0);
 		p->first_page = page;
+		/* Make sure p->first_page is always valid for PageTail() */
+		smp_wmb();
+		__SetPageTail(p);
 	}
 }
 
@@ -692,8 +923,13 @@ static void free_one_page(struct zone *zone, struct page *page, int order,
 	zone->pages_scanned = 0;
 
 	__free_one_page(page, zone, order, migratetype);
+#ifdef CONFIG_ACCURATE_FREE_PAGES_CHECK
+	if (likely(!is_migrate_isolate(migratetype)))
+		__mod_zone_freepage_state(zone, 1 << order, migratetype);
+#else
 	if (unlikely(!is_migrate_isolate(migratetype)))
 		__mod_zone_freepage_state(zone, 1 << order, migratetype);
+#endif
 	spin_unlock(&zone->lock);
 }
 
@@ -701,6 +937,9 @@ static bool free_pages_prepare(struct page *page, unsigned int order)
 {
 	int i;
 	int bad = 0;
+#ifdef CONFIG_PTRACK_DEBUG
+	int page_num;
+#endif
 
 	trace_mm_page_free(page, order);
 	kmemcheck_free_shadow(page, order);
@@ -719,6 +958,14 @@ static bool free_pages_prepare(struct page *page, unsigned int order)
 	}
 	arch_free_page(page, order);
 	kernel_map_pages(page, 1 << order, 0);
+
+#ifdef CONFIG_PTRACK_DEBUG
+	if (ptrack_check_target(page)) {
+		page_num = 1 << order;
+		for (i = 0; i < page_num; i++)
+			ptrack_set(&page[i], PTRACK_FREE, _RET_IP_);
+	}
+#endif
 
 	return true;
 }
@@ -1052,6 +1299,8 @@ __rmqueue_fallback(struct zone *zone, int order, int start_migratetype)
 			if (!is_migrate_cma(migratetype) &&
 			    (unlikely(current_order >= pageblock_order / 2) ||
 			     start_migratetype == MIGRATE_RECLAIMABLE ||
+			     start_migratetype == MIGRATE_UNMOVABLE ||
+			     start_migratetype == MIGRATE_MOVABLE ||
 			     page_group_by_mobility_disabled)) {
 				int pages;
 				pages = move_freepages_block(zone, page,
@@ -1059,6 +1308,7 @@ __rmqueue_fallback(struct zone *zone, int order, int start_migratetype)
 
 				/* Claim the whole block if over half of it is free */
 				if (pages >= (1 << (pageblock_order-1)) ||
+						start_migratetype == MIGRATE_MOVABLE ||
 						page_group_by_mobility_disabled)
 					set_pageblock_migratetype(page,
 								start_migratetype);
@@ -1319,6 +1569,17 @@ void free_hot_cold_page(struct page *page, int cold)
 	struct per_cpu_pages *pcp;
 	unsigned long flags;
 	int migratetype;
+
+#ifdef CONFIG_SCFS_LOWER_PAGECACHE_INVALIDATION
+	/*
+	   struct scfs_sb_info *sbi;
+
+	   if (PageScfslower(page) || PageNocache(page)) {
+	   sbi = SCFS_S(page->mapping->host->i_sb);
+	   sbi->scfs_lowerpage_reclaim_count++;
+	   }
+	 */
+#endif
 
 	if (!free_pages_prepare(page, 0))
 		return;
@@ -1617,6 +1878,188 @@ static inline bool should_fail_alloc_page(gfp_t gfp_mask, unsigned int order)
 
 #endif /* CONFIG_FAIL_PAGE_ALLOC */
 
+#ifdef CONFIG_PTRACK_DEBUG
+static unsigned ptrack_current;
+static unsigned ptrack_mode;
+
+static void ptrack_debugfs_show_stack(struct seq_file *s, struct ptrack * ptrack)
+{
+	int i;
+
+	for (i = 0; i < PTRACK_ADDRS_COUNT; i++) {
+		seq_printf(s, "[%p] %pS\n", (void *)ptrack->addrs[i], (void *)ptrack->addrs[i]);
+	}
+}
+
+static int ptrack_debugfs_show(struct seq_file *s, void *data)
+{
+	struct page *p;
+	int flag;
+	char *state[] = {"(Alloc)", "(Free)", "(None)"};
+	struct ptrack *ptrack_alloc;
+	struct ptrack *ptrack_free;
+
+	unsigned test_mode = ptrack_mode & 0x01;
+	unsigned track_on = ptrack_mode & 0x02;
+
+
+	seq_printf(s, "ptrack_mode : 0x%x\n", ptrack_mode);
+
+	if (!test_mode) {
+		struct page *base_page;
+		int i;
+		int j;
+
+		for (i = 0; i < 4; i++) {
+			base_page = alloc_pages(GFP_KERNEL, i);
+
+			if (base_page == NULL) {
+				seq_printf(s, "=================================================================\n");
+				continue;
+			}
+
+			for (j = 0; j < 1 << i; j++) {
+				p = &base_page[j];
+				ptrack_alloc = ptrack_get(p, PTRACK_ALLOC);
+				ptrack_free = ptrack_get(p, PTRACK_FREE);
+
+				flag = 2;
+				if (ptrack_free->when > ptrack_alloc->when)
+					flag = 1;
+				else
+					flag = 0;
+
+				seq_printf(s, "[0x%x] ALLOC(order:%d) - cpu(%d)\tpid(%04d)\twhen(0x%016llx)\taddr(0x%08x)\t%s\n",
+							(unsigned)page_address(p), i, ptrack_alloc->cpu, ptrack_alloc->pid, ptrack_alloc->when, (unsigned)ptrack_alloc->addr, state[flag]);
+				if (track_on)
+					ptrack_debugfs_show_stack(s, ptrack_alloc);
+				seq_printf(s, "[0x%x] FREE (order:%d) - cpu(%d)\tpid(%04d)\twhen(0x%016llx)\taddr(0x%08x)\t%s\n",
+							(unsigned)page_address(p), i, ptrack_free->cpu, ptrack_free->pid, ptrack_free->when, (unsigned)ptrack_free->addr, state[flag]);
+				if (track_on)
+					ptrack_debugfs_show_stack(s, ptrack_free);
+			}
+
+			seq_printf(s, "-----------------------------------------------------------------\n");
+			__free_pages(base_page, i);
+
+			for (j = 0; j < 1 << i; j++) {
+				p = &base_page[j];
+				ptrack_alloc = ptrack_get(p, PTRACK_ALLOC);
+				ptrack_free = ptrack_get(p, PTRACK_FREE);
+
+				flag = 2;
+				if (ptrack_free->when > ptrack_alloc->when)
+					flag = 1;
+				else
+					flag = 0;
+
+				seq_printf(s, "[0x%x] ALLOC(order:%d) - cpu(%d)\tpid(%04d)\twhen(0x%016llx)\taddr(0x%08x)\t%s\n",
+							(unsigned)page_address(p), i, ptrack_alloc->cpu, ptrack_alloc->pid, ptrack_alloc->when, (unsigned)ptrack_alloc->addr, state[flag]);
+				if (track_on)
+					ptrack_debugfs_show_stack(s, ptrack_alloc);
+				seq_printf(s, "[0x%x] FREE (order:%d) - cpu(%d)\tpid(%04d)\twhen(0x%016llx)\taddr(0x%08x)\t%s\n",
+							(unsigned)page_address(p), i, ptrack_free->cpu, ptrack_free->pid, ptrack_free->when, (unsigned)ptrack_free->addr, state[flag]);
+				if (track_on)
+					ptrack_debugfs_show_stack(s, ptrack_free);
+
+			}
+
+			seq_printf(s, "=================================================================\n");
+		}
+	}else{
+		int count;
+
+		if (ptrack_current < (unsigned)PAGE_OFFSET || ptrack_current > (unsigned)high_memory)
+			ptrack_current = (unsigned)PAGE_OFFSET;
+
+		for (count = 0; count < 16; count++) {
+			p = virt_to_page((void *)ptrack_current);
+
+			ptrack_alloc = ptrack_get(p, PTRACK_ALLOC);
+			ptrack_free = ptrack_get(p, PTRACK_FREE);
+
+			flag = 2;
+			if (!ptrack_alloc && ptrack_free)
+				flag = 1;
+			else if (ptrack_alloc && !ptrack_free)
+				flag = 0;
+			else if (ptrack_alloc && ptrack_free) {
+				if (ptrack_free->when > ptrack_alloc->when)
+					flag = 1;
+				else
+					flag = 0;
+			} else {
+				count--;
+				goto none;
+			}
+
+			if (ptrack_alloc) {
+				seq_printf(s, "[0x%x] ALLOC - cpu(%d)\tpid(%04d)\twhen(0x%016llx)\taddr(0x%08x)\t%s\n",
+					(unsigned)ptrack_current, ptrack_alloc->cpu, ptrack_alloc->pid, ptrack_alloc->when, (unsigned)ptrack_alloc->addr, state[flag]);
+				if (track_on)
+					ptrack_debugfs_show_stack(s, ptrack_alloc);
+			} else {
+				seq_printf(s, "[0x%x] ALLOC - NULL\n", (unsigned)ptrack_current);
+			}
+
+			if (ptrack_free) {
+				seq_printf(s, "[0x%x] FREE  - cpu(%d)\tpid(%04d)\twhen(0x%016llx)\taddr(0x%08x)\t%s\n",
+					(unsigned)ptrack_current, ptrack_free->cpu, ptrack_free->pid, ptrack_free->when, (unsigned)ptrack_free->addr, state[flag]);
+				if (track_on)
+					ptrack_debugfs_show_stack(s, ptrack_free);
+			} else {
+				seq_printf(s, "[0x%x] FREE  - NULL\n", (unsigned)ptrack_current);
+			}
+
+none:
+			ptrack_current = ptrack_current + PAGE_SIZE;
+		}
+	}
+	seq_printf(s, "\n");
+
+	return 0;
+}
+
+
+int pstack_debugfs_write(struct file *file, const char __user *user_buf,
+								size_t size, loff_t *ppos)
+{
+	char buf[0x20];
+	long ptrack_new;
+
+	simple_write_to_buffer(buf, 0x20, ppos, user_buf, size);
+	ptrack_new = simple_strtol((const char *)buf, NULL, 16);
+
+	if (ptrack_new == 0 || ptrack_new == 1 || ptrack_new == 2 || ptrack_new == 3)
+		ptrack_mode = ptrack_new;
+	else
+		ptrack_current = ptrack_new;
+
+	return size;
+}
+
+static int ptrack_debugfs_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, ptrack_debugfs_show, inode->i_private);
+}
+
+static const struct file_operations ptrack_debugfs_fops = {
+	.open           = ptrack_debugfs_open,
+	.read           = seq_read,
+	.write			= pstack_debugfs_write,
+	.llseek         = seq_lseek,
+	.release        = single_release,
+};
+
+static int __init debug_ptrack_init(void)
+{
+	debugfs_create_file("ptrack", S_IRUGO|S_IWUGO, NULL, NULL, &ptrack_debugfs_fops);
+	return 0;
+}
+
+late_initcall(debug_ptrack_init);
+#endif /* CONFIG_PTRACK_DEBUG */
+
 /*
  * Return true if free pages are above 'mark'. This takes into account the order
  * of the allocation.
@@ -1643,12 +2086,18 @@ static bool __zone_watermark_ok(struct zone *z, int order, unsigned long mark,
 
 	if (free_pages - free_cma <= min + lowmem_reserve)
 		return false;
+#ifdef CONFIG_ACCURATE_FREE_PAGES_CHECK
+	/*recaculate free_page cause by imbalancing between zone page state and free_area*/
+	free_pages = 0;
+	for (o = 0; o < MAX_ORDER; o++)
+		free_pages += z->free_area[o].nr_free << o;
+#endif
 	for (o = 0; o < order; o++) {
 		/* At the next order, this order's pages become unavailable */
 		free_pages -= z->free_area[o].nr_free << o;
 
 		/* Require fewer higher order pages to be free */
-		min >>= 1;
+		min >>= min_free_order_shift;
 
 		if (free_pages <= min)
 			return false;
@@ -2387,6 +2836,61 @@ bool gfp_pfmemalloc_allowed(gfp_t gfp_mask)
 	return !!(gfp_to_alloc_flags(gfp_mask) & ALLOC_NO_WATERMARKS);
 }
 
+#if defined(CONFIG_SEC_SLOWPATH)
+unsigned int oomk_state; /* 0 none, bit_0 time's up, bit_1 OOMK */
+
+struct slowpath_pressure {
+	unsigned int total_jiffies;
+	struct mutex slow_lock;
+} slowpath;
+
+/* slowtime - milliseconds time spend int __alloc_pages_slowpath() */
+static void slowpath_pressure(unsigned int slowtime)
+{
+	mutex_lock(&slowpath.slow_lock);
+	if (unlikely(slowpath.total_jiffies + slowtime >= UINT_MAX))
+		slowpath.total_jiffies = UINT_MAX;
+	else
+		slowpath.total_jiffies += slowtime;
+	mutex_unlock(&slowpath.slow_lock);
+}
+
+unsigned int get_and_reset_timeup(void)
+{
+	bool val = 0;
+
+	val = oomk_state;
+	oomk_state = 0;
+	pr_debug("%s: timeup %u\n", __func__, val);
+
+	return val;
+}
+
+unsigned int get_and_reset_slowtime(void)
+{
+	static bool first_read = false;
+	unsigned int slowtime = 0;
+
+	slowtime = slowpath.total_jiffies;
+	if (unlikely(first_read == false)) {
+		first_read = true;
+		slowtime = 0;
+	}
+	slowpath.total_jiffies = 0;
+	pr_debug("%s: slowtime %u\n", __func__, slowtime);
+
+	return slowtime;
+}
+
+static int __init slowpath_init(void)
+{
+	mutex_init(&slowpath.slow_lock);
+	return 0;
+}
+
+module_init(slowpath_init);
+#endif
+
 static inline struct page *
 __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
 	struct zonelist *zonelist, enum zone_type high_zoneidx,
@@ -2401,7 +2905,13 @@ __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
 	bool sync_migration = false;
 	bool deferred_compaction = false;
 	bool contended_compaction = false;
+#if defined(CONFIG_SEC_OOM_KILLER) || defined(CONFIG_OOM_KILLER_TIMEOUT)
+	unsigned long oom_invoke_timeout = jiffies + HZ/4;
+#endif
 
+#ifdef CONFIG_SEC_SLOWPATH
+	unsigned long slowpath_time = jiffies;
+#endif
 	/*
 	 * In the slowpath, we sanity check order to avoid ever trying to
 	 * reclaim >= MAX_ORDER areas which will never succeed. Callers may
@@ -2521,7 +3031,12 @@ rebalance:
 	 * If we failed to make any progress reclaiming, then we are
 	 * running out of options and have to consider going OOM
 	 */
-	if (!did_some_progress) {
+#if defined(CONFIG_SEC_OOM_KILLER) || defined(CONFIG_OOM_KILLER_TIMEOUT)
+#define SHOULD_CONSIDER_OOM (!did_some_progress || time_after(jiffies, oom_invoke_timeout)) && (boot_mode != 2)
+#else
+#define SHOULD_CONSIDER_OOM !did_some_progress && (boot_mode != 2)
+#endif
+	if (SHOULD_CONSIDER_OOM) {
 		if ((gfp_mask & __GFP_FS) && !(gfp_mask & __GFP_NORETRY)) {
 			if (oom_killer_disabled)
 				goto nopage;
@@ -2529,6 +3044,18 @@ rebalance:
 			if ((current->flags & PF_DUMPCORE) &&
 			    !(gfp_mask & __GFP_NOFAIL))
 				goto nopage;
+#if defined(CONFIG_SEC_OOM_KILLER) || defined(CONFIG_OOM_KILLER_TIMEOUT)
+			if (did_some_progress){
+				pr_info("time's up : calling "
+					"__alloc_pages_may_oom(o:%d, gfp:0x%x)\n", order, gfp_mask);
+
+#if defined(CONFIG_SEC_SLOWPATH)
+				oomk_state |= 0x01;
+#endif
+			}
+
+#endif
+
 			page = __alloc_pages_may_oom(gfp_mask, order,
 					zonelist, high_zoneidx,
 					nodemask, preferred_zone,
@@ -2554,6 +3081,9 @@ rebalance:
 					goto nopage;
 			}
 
+#if defined(CONFIG_SEC_OOM_KILLER) || defined(CONFIG_OOM_KILLER_TIMEOUT)
+			oom_invoke_timeout = jiffies + HZ/4;
+#endif
 			goto restart;
 		}
 	}
@@ -2585,11 +3115,20 @@ rebalance:
 
 nopage:
 	warn_alloc_failed(gfp_mask, order, NULL);
+#if defined(CONFIG_SEC_SLOWPATH)
+	slowpath_time = jiffies - slowpath_time;
+	if (wait && slowpath_time)
+		slowpath_pressure(slowpath_time);
+#endif
 	return page;
 got_pg:
 	if (kmemcheck_enabled)
 		kmemcheck_pagealloc_alloc(page, order, gfp_mask);
-
+#if defined(CONFIG_SEC_SLOWPATH)
+	slowpath_time = jiffies - slowpath_time;
+	if (wait && slowpath_time)
+		slowpath_pressure(slowpath_time);
+#endif
 	return page;
 }
 
@@ -2607,6 +3146,10 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order,
 	unsigned int cpuset_mems_cookie;
 	int alloc_flags = ALLOC_WMARK_LOW|ALLOC_CPUSET;
 	struct mem_cgroup *memcg = NULL;
+
+#ifdef CONFIG_PTRACK_DEBUG
+	int i, page_num;
+#endif
 
 	gfp_mask &= gfp_allowed_mask;
 
@@ -2675,6 +3218,14 @@ out:
 		goto retry_cpuset;
 
 	memcg_kmem_commit_charge(page, memcg, order);
+
+#ifdef CONFIG_PTRACK_DEBUG
+	if (ptrack_check_target(page)) {
+		page_num = 1 << order;
+		for (i = 0; i < page_num; i++)
+			ptrack_set(&page[i], PTRACK_ALLOC, _RET_IP_);
+	}
+#endif
 
 	return page;
 }
@@ -5320,6 +5871,7 @@ static void setup_per_zone_lowmem_reserve(void)
 static void __setup_per_zone_wmarks(void)
 {
 	unsigned long pages_min = min_free_kbytes >> (PAGE_SHIFT - 10);
+	unsigned long pages_low = extra_free_kbytes >> (PAGE_SHIFT - 10);
 	unsigned long lowmem_pages = 0;
 	struct zone *zone;
 	unsigned long flags;
@@ -5331,11 +5883,14 @@ static void __setup_per_zone_wmarks(void)
 	}
 
 	for_each_zone(zone) {
-		u64 tmp;
+		u64 min, low;
 
 		spin_lock_irqsave(&zone->lock, flags);
-		tmp = (u64)pages_min * zone->managed_pages;
-		do_div(tmp, lowmem_pages);
+		min = (u64)pages_min * zone->managed_pages;
+		do_div(min, lowmem_pages);
+		low = (u64)pages_low * zone->managed_pages;
+		do_div(low, vm_total_pages);
+
 		if (is_highmem(zone)) {
 			/*
 			 * __GFP_HIGH and PF_MEMALLOC allocations usually don't
@@ -5356,11 +5911,13 @@ static void __setup_per_zone_wmarks(void)
 			 * If it's a lowmem zone, reserve a number of pages
 			 * proportionate to the zone's size.
 			 */
-			zone->watermark[WMARK_MIN] = tmp;
+			zone->watermark[WMARK_MIN] = min;
 		}
 
-		zone->watermark[WMARK_LOW]  = min_wmark_pages(zone) + (tmp >> 2);
-		zone->watermark[WMARK_HIGH] = min_wmark_pages(zone) + (tmp >> 1);
+		zone->watermark[WMARK_LOW]  = min_wmark_pages(zone) +
+					low + (min >> 2);
+		zone->watermark[WMARK_HIGH] = min_wmark_pages(zone) +
+					low + (min >> 1);
 
 		setup_zone_migrate_reserve(zone);
 		spin_unlock_irqrestore(&zone->lock, flags);
@@ -5407,6 +5964,9 @@ void setup_per_zone_wmarks(void)
  */
 static void __meminit calculate_zone_inactive_ratio(struct zone *zone)
 {
+#ifdef CONFIG_FIX_INACTIVE_RATIO
+	zone->inactive_ratio = 1;
+#else
 	unsigned int gb, ratio;
 
 	/* Zone size in gigabytes */
@@ -5417,6 +5977,7 @@ static void __meminit calculate_zone_inactive_ratio(struct zone *zone)
 		ratio = 1;
 
 	zone->inactive_ratio = ratio;
+#endif
 }
 
 static void __meminit setup_per_zone_inactive_ratio(void)
@@ -5471,11 +6032,11 @@ int __meminit init_per_zone_wmark_min(void)
 module_init(init_per_zone_wmark_min)
 
 /*
- * min_free_kbytes_sysctl_handler - just a wrapper around proc_dointvec() so 
+ * min_free_kbytes_sysctl_handler - just a wrapper around proc_dointvec() so
  *	that we can call two helper functions whenever min_free_kbytes
- *	changes.
+ *	or extra_free_kbytes changes.
  */
-int min_free_kbytes_sysctl_handler(ctl_table *table, int write, 
+int min_free_kbytes_sysctl_handler(ctl_table *table, int write,
 	void __user *buffer, size_t *length, loff_t *ppos)
 {
 	proc_dointvec(table, write, buffer, length, ppos);
@@ -6212,6 +6773,10 @@ static const struct trace_print_flags pageflag_names[] = {
 #endif
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	{1UL << PG_compound_lock,	"compound_lock"	},
+#endif
+#ifdef CONFIG_SCFS_LOWER_PAGECACHE_INVALIDATION
+	{1UL << PG_scfslower,		"scfslower"	},
+	{1UL << PG_nocache,		"nocache"	},
 #endif
 };
 

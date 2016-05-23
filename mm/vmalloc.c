@@ -32,6 +32,8 @@
 #include <asm/tlbflush.h>
 #include <asm/shmparam.h>
 
+extern int boot_mode_security;
+
 struct vfree_deferred {
 	struct llist_head list;
 	struct work_struct wq;
@@ -57,11 +59,35 @@ static void vunmap_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end)
 {
 	pte_t *pte;
 
+#ifdef CONFIG_TIMA_RKP_LAZY_MMU
+	unsigned long do_lazy_mmu = 0;
+#endif
+
 	pte = pte_offset_kernel(pmd, addr);
+	
+#ifdef CONFIG_TIMA_RKP_LAZY_MMU
+	if (boot_mode_security && tima_is_pg_protected((unsigned long)pte) == 1)
+		do_lazy_mmu = 1;
+	if (do_lazy_mmu) {
+		spin_lock(&init_mm.page_table_lock);
+		tima_send_cmd2((unsigned int)pmd, TIMA_LAZY_MMU_START, TIMA_LAZY_MMU_CMDID);
+		flush_tlb_l2_page(pmd);
+		spin_unlock(&init_mm.page_table_lock);
+	}
+#endif
 	do {
 		pte_t ptent = ptep_get_and_clear(&init_mm, addr, pte);
 		WARN_ON(!pte_none(ptent) && !pte_present(ptent));
 	} while (pte++, addr += PAGE_SIZE, addr != end);
+
+#ifdef CONFIG_TIMA_RKP_LAZY_MMU
+	if (do_lazy_mmu) {
+		spin_lock(&init_mm.page_table_lock);
+		tima_send_cmd2((unsigned int)pmd, TIMA_LAZY_MMU_STOP, TIMA_LAZY_MMU_CMDID);
+		flush_tlb_l2_page(pmd);
+		spin_unlock(&init_mm.page_table_lock);
+	}
+#endif
 }
 
 static void vunmap_pmd_range(pud_t *pud, unsigned long addr, unsigned long end)
@@ -111,6 +137,9 @@ static int vmap_pte_range(pmd_t *pmd, unsigned long addr,
 		unsigned long end, pgprot_t prot, struct page **pages, int *nr)
 {
 	pte_t *pte;
+#ifdef CONFIG_TIMA_RKP_LAZY_MMU
+	unsigned long do_lazy_mmu = 0;
+#endif
 
 	/*
 	 * nr is a running index into the array which helps higher level
@@ -120,6 +149,16 @@ static int vmap_pte_range(pmd_t *pmd, unsigned long addr,
 	pte = pte_alloc_kernel(pmd, addr);
 	if (!pte)
 		return -ENOMEM;
+#ifdef CONFIG_TIMA_RKP_LAZY_MMU
+	if (boot_mode_security && tima_is_pg_protected((unsigned long)pte) == 1)
+		do_lazy_mmu = 1;
+	if (do_lazy_mmu) {
+		spin_lock(&init_mm.page_table_lock);
+		tima_send_cmd2((unsigned int)pmd, TIMA_LAZY_MMU_START, TIMA_LAZY_MMU_CMDID);
+		flush_tlb_l2_page(pmd);
+		spin_unlock(&init_mm.page_table_lock);
+	}
+#endif
 	do {
 		struct page *page = pages[*nr];
 
@@ -130,6 +169,14 @@ static int vmap_pte_range(pmd_t *pmd, unsigned long addr,
 		set_pte_at(&init_mm, addr, pte, mk_pte(page, prot));
 		(*nr)++;
 	} while (pte++, addr += PAGE_SIZE, addr != end);
+#ifdef CONFIG_TIMA_RKP_LAZY_MMU
+	if (do_lazy_mmu) {
+		spin_lock(&init_mm.page_table_lock);
+		tima_send_cmd2((unsigned int)pmd, TIMA_LAZY_MMU_STOP, TIMA_LAZY_MMU_CMDID);
+		flush_tlb_l2_page(pmd);
+		spin_unlock(&init_mm.page_table_lock);
+	}
+#endif
 	return 0;
 }
 

@@ -888,4 +888,31 @@ config TOUCHSCREEN_TPS6507X
 	  To compile this driver as a module, choose M here: the
 	  module will be called tps6507x_ts.
 
+config TOUCHSCREEN_MXT540E
+	tristate "Atmel MXT540E Touchscreen Interface"
+	depends on I2C
+	default n
+	help
+	  Say Y here if you want support for atmel_MXT540E touchscreen controllers.
+	  To compile this driver as a module, choose M here: the
+	  module will be called mxt540e.
+
+config TOUCHSCREEN_CHAGALLVE
+	tristate "Synaptics DSX i2c touchscreen"
+	default n
+	help
+	  Say Y here to load firmware for touchscreen.
+
+config TOUCHSCREEN_KLIMTVE
+	tristate "Synaptics DSX i2c touchscreen"
+	default n
+	help
+	  Say Y here to load firmware for touchscreen
+
+source "drivers/input/touchscreen/synaptics_dsx/Kconfig"
+source "drivers/input/touchscreen/synaptics_dsx2/Kconfig"
+source "drivers/input/touchscreen/cyttsp5/Kconfig"
+source "drivers/input/touchscreen/cyttsp5_A7A/Kconfig"
+source "drivers/input/touchscreen/stm/Kconfig"
+source "drivers/input/touchscreen/melfas_mms400/Kconfig"
 endif

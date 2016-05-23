@@ -212,8 +212,15 @@ extern void dump_stack(void) __cold;
 	printk(KERN_ALERT pr_fmt(fmt), ##__VA_ARGS__)
 #define pr_crit(fmt, ...) \
 	printk(KERN_CRIT pr_fmt(fmt), ##__VA_ARGS__)
+#if defined(CONFIG_SEC_BAT_AUT) && !defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
+#define BAT_AUTOMAION_TEST_PREFIX_ERR "<3>@BATAUTERR@"
+#define BAT_AUTOMAION_TEST_PREFIX_WARN "<3>@BATAUTWARN@"
+#define pr_err(fmt, ...) \
+	printk(BAT_AUTOMAION_TEST_PREFIX_ERR pr_fmt(fmt), ##__VA_ARGS__)
+#else
 #define pr_err(fmt, ...) \
 	printk(KERN_ERR pr_fmt(fmt), ##__VA_ARGS__)
+#endif
 #define pr_warning(fmt, ...) \
 	printk(KERN_WARNING pr_fmt(fmt), ##__VA_ARGS__)
 #define pr_warn pr_warning
@@ -396,5 +403,9 @@ static inline void print_hex_dump_bytes(const char *prefix_str, int prefix_type,
 	print_hex_dump(KERN_DEBUG, prefix_str, prefix_type, rowsize,	\
 		       groupsize, buf, len, ascii)
 #endif /* defined(CONFIG_DYNAMIC_DEBUG) */
+
+#if defined(CONFIG_SEC_DEBUG)
+extern void disable_printk_process(void);
+#endif /* defined(CONFIG_SEC_DEBUG) */
 
 #endif
