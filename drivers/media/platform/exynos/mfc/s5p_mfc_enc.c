@@ -898,8 +898,8 @@ static struct v4l2_queryctrl controls[] = {
 		.id = V4L2_CID_MPEG_VIDEO_QOS_RATIO,
 		.type = V4L2_CTRL_TYPE_INTEGER,
 		.name = "QoS ratio value",
-		.minimum = 0,
-		.maximum = 1000,
+		.minimum = 20,
+		.maximum = 200,
 		.step = 10,
 		.default_value = 100,
 	},
@@ -1524,10 +1524,6 @@ int s5p_mfc_enc_ctx_ready(struct s5p_mfc_ctx *ctx)
 		return 1;
 	/* context is ready to encode a frame in case of B frame */
 	if (ctx->state == MFCINST_RUNNING_NO_OUTPUT &&
-		ctx->src_queue_cnt >= 1 && ctx->dst_queue_cnt >= 1)
-		return 1;
-	/* context is ready to encode a frame for NAL_ABORT command */
-	if (ctx->state == MFCINST_ABORT_INST &&
 		ctx->src_queue_cnt >= 1 && ctx->dst_queue_cnt >= 1)
 		return 1;
 	/* context is ready to encode remain frames */
@@ -2179,14 +2175,9 @@ static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 	strm_size = s5p_mfc_get_enc_strm_size();
 	pic_count = s5p_mfc_get_enc_pic_count();
 
-	mfc_debug(2, "encoded slice type: %d\n", slice_type);
-	mfc_debug(2, "encoded stream size: %d\n", strm_size);
-	mfc_debug(2, "display order: %d\n", pic_count);
-
-	if (enc->buf_full) {
-		ctx->state = MFCINST_ABORT_INST;
-		return 0;
-	}
+	mfc_debug(2, "encoded slice type: %d", slice_type);
+	mfc_debug(2, "encoded stream size: %d", strm_size);
+	mfc_debug(2, "display order: %d", pic_count);
 
 	/* set encoded frame type */
 	enc->frame_type = slice_type;
@@ -2195,8 +2186,7 @@ static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 	spin_lock_irqsave(&dev->irqlock, flags);
 
 	ctx->sequence++;
-	if (strm_size > 0 || ctx->state == MFCINST_FINISHING
-			  || ctx->state == MFCINST_RUNNING_BUF_FULL) {
+	if (strm_size > 0 || ctx->state == MFCINST_FINISHING) {
 		/* at least one more dest. buffers exist always  */
 		mb_entry = list_entry(ctx->dst_queue.next, struct s5p_mfc_buf, list);
 
@@ -2256,8 +2246,7 @@ static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 
 	if (slice_type >= 0 &&
 			ctx->state != MFCINST_FINISHING) {
-		if (ctx->state == MFCINST_RUNNING_NO_OUTPUT ||
-			ctx->state == MFCINST_RUNNING_BUF_FULL)
+		if (ctx->state == MFCINST_RUNNING_NO_OUTPUT)
 			ctx->state = MFCINST_RUNNING;
 
 		s5p_mfc_get_enc_frame_buffer(ctx, &enc_addr[0], raw->num_planes);
@@ -2316,8 +2305,7 @@ static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 
 	if ((ctx->src_queue_cnt > 0) &&
 		((ctx->state == MFCINST_RUNNING) ||
-		 (ctx->state == MFCINST_RUNNING_NO_OUTPUT) ||
-		 (ctx->state == MFCINST_RUNNING_BUF_FULL))) {
+		 (ctx->state == MFCINST_RUNNING_NO_OUTPUT))) {
 		mb_entry = list_entry(ctx->src_queue.next, struct s5p_mfc_buf, list);
 
 		if (mb_entry->used) {
@@ -2825,10 +2813,9 @@ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *buf)
 calc_again:
 #endif
 			if (ctx->last_framerate != 0 &&
-				((ctx->last_framerate != ctx->framerate) || ctx->qos_changed)) {
-				mfc_debug(2, "fps changed: %d -> %d (%s)\n",
-					ctx->framerate, ctx->last_framerate,
-					ctx->use_extra_qos ? "extra" : "normal");
+				ctx->last_framerate != ctx->framerate) {
+				mfc_debug(2, "fps changed: %d -> %d\n",
+					ctx->framerate, ctx->last_framerate);
 				ctx->framerate = ctx->last_framerate;
 				s5p_mfc_qos_on(ctx);
 			}
@@ -3552,18 +3539,7 @@ static int set_ctrl_val(struct s5p_mfc_ctx *ctx, struct v4l2_control *ctrl)
 			ctx->cacheable = 0;
 		break;
 	case V4L2_CID_MPEG_VIDEO_QOS_RATIO:
-		if (ctrl->value > 150)
-			ctrl->value = 1000;
-		if (ctrl->value == 0) {
-			ctrl->value = 100;
-			ctx->use_extra_qos = 1;
-			mfc_info_ctx("QOS_RATIO is 0, use extra qos!\n");
-		} else {
-			ctx->use_extra_qos = 0;
-			mfc_info_ctx("QOS_RATIO is %d, use extra qos!\n", ctrl->value);
-		}
 		ctx->qos_ratio = ctrl->value;
-		ctx->qos_changed = 1;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_MAX_QP:
 	case V4L2_CID_MPEG_VIDEO_H263_MAX_QP:
@@ -4053,6 +4029,10 @@ static int s5p_mfc_start_streaming(struct vb2_queue *q, unsigned int count)
 	return 0;
 }
 
+#define need_to_wait_frame_start(ctx)		\
+	(((ctx->state == MFCINST_FINISHING) ||	\
+	  (ctx->state == MFCINST_RUNNING)) &&	\
+	 test_bit(ctx->num, &ctx->dev->hw_lock))
 static int s5p_mfc_stop_streaming(struct vb2_queue *q)
 {
 	unsigned long flags;
@@ -4070,15 +4050,7 @@ static int s5p_mfc_stop_streaming(struct vb2_queue *q)
 		aborted = 1;
 	}
 
-	if (need_to_wait_nal_abort(ctx)) {
-		ctx->state = MFCINST_ABORT;
-		if (s5p_mfc_wait_for_done_ctx(ctx,
-				S5P_FIMV_R2H_CMD_NAL_ABORT_RET))
-			s5p_mfc_cleanup_timeout(ctx);
-		aborted = 1;
-	}
-
-	if (enc->in_slice || enc->buf_full) {
+	if (enc->in_slice) {
 		ctx->state = MFCINST_ABORT_INST;
 		spin_lock_irq(&dev->condlock);
 		set_bit(ctx->num, &dev->ctx_work_bits);
@@ -4089,7 +4061,6 @@ static int s5p_mfc_stop_streaming(struct vb2_queue *q)
 			s5p_mfc_cleanup_timeout(ctx);
 
 		enc->in_slice = 0;
-		enc->buf_full = 0;
 		aborted = 1;
 	}
 
