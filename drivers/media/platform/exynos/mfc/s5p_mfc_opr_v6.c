@@ -638,16 +638,21 @@ static void set_linear_stride_size(struct s5p_mfc_ctx *ctx,
 	switch (fmt->fourcc) {
 	case V4L2_PIX_FMT_YUV420M:
 	case V4L2_PIX_FMT_YVU420M:
-		raw->stride[0] = ALIGN(ctx->img_width, 16);
-		raw->stride[1] = ALIGN(raw->stride[0] >> 1, 16);
-		raw->stride[2] = ALIGN(raw->stride[0] >> 1, 16);
+		raw->stride[0] = (ctx->buf_stride > ctx->img_width) ?
+			ALIGN(ctx->img_width, 16) : ctx->img_width;
+		raw->stride[1] = (ctx->buf_stride > ctx->img_width) ?
+			ALIGN(ctx->img_width, 16) >> 1 : ctx->img_width >> 1;
+		raw->stride[2] = (ctx->buf_stride > ctx->img_width) ?
+			ALIGN(ctx->img_width, 16) >> 1 : ctx->img_width >> 1;
 		break;
 	case V4L2_PIX_FMT_NV12MT_16X16:
 	case V4L2_PIX_FMT_NV12MT:
 	case V4L2_PIX_FMT_NV12M:
 	case V4L2_PIX_FMT_NV21M:
-		raw->stride[0] = ALIGN(ctx->img_width, 16);
-		raw->stride[1] = ALIGN(ctx->img_width, 16);
+		raw->stride[0] = (ctx->buf_stride > ctx->img_width) ?
+				ALIGN(ctx->img_width, 16) : ctx->img_width;
+		raw->stride[1] = (ctx->buf_stride > ctx->img_width) ?
+				ALIGN(ctx->img_width, 16) : ctx->img_width;
 		raw->stride[2] = 0;
 		break;
 	case V4L2_PIX_FMT_RGB24:
@@ -889,6 +894,7 @@ int s5p_mfc_set_dec_stream_buffer(struct s5p_mfc_ctx *ctx, dma_addr_t buf_addr,
 				cpb_buf_size, strm_size);
 	if (ctx->state == MFCINST_GOT_INST && strm_size == 0)
 		mfc_info_ctx("stream size is 0\n");
+
 
 	WRITEL(strm_size, S5P_FIMV_D_STREAM_DATA_SIZE);
 	WRITEL(buf_addr, S5P_FIMV_D_CPB_BUFFER_ADDR);
@@ -1176,8 +1182,6 @@ int s5p_mfc_set_enc_stream_buffer(struct s5p_mfc_ctx *ctx,
 		dma_addr_t addr, unsigned int size)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
-
-	size = ALIGN(size, 512);
 
 	WRITEL(addr, S5P_FIMV_E_STREAM_BUFFER_ADDR); /* 16B align */
 	WRITEL(size, S5P_FIMV_E_STREAM_BUFFER_SIZE);

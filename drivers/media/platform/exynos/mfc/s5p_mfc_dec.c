@@ -378,7 +378,7 @@ static struct v4l2_queryctrl controls[] = {
 		.id = V4L2_CID_MPEG_VIDEO_QOS_RATIO,
 		.type = V4L2_CTRL_TYPE_INTEGER,
 		.name = "QoS ratio value",
-		.minimum = 0,
+		.minimum = 20,
 		.maximum = 1000,
 		.step = 10,
 		.default_value = 100,
@@ -405,6 +405,15 @@ static struct v4l2_queryctrl controls[] = {
 		.id = V4L2_CID_MPEG_MFC_GET_EXT_INFO,
 		.type = V4L2_CTRL_TYPE_INTEGER,
 		.name = "Get extra information",
+		.minimum = INT_MIN,
+		.maximum = INT_MAX,
+		.step = 1,
+		.default_value = 0,
+	},
+	{
+		.id = V4L2_CID_MPEG_MFC_SET_BUF_PROCESS_TYPE,
+		.type = V4L2_CTRL_TYPE_INTEGER,
+		.name = "Set buffer process type",
 		.minimum = INT_MIN,
 		.maximum = INT_MAX,
 		.step = 1,
@@ -1718,10 +1727,9 @@ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *buf)
 				sizeof(struct timeval));
 		}
 		if (ctx->last_framerate != 0 &&
-				((ctx->last_framerate != ctx->framerate) || ctx->qos_changed)) {
-			mfc_debug(2, "fps changed: %d -> %d (%s)\n",
-					ctx->framerate, ctx->last_framerate,
-					ctx->use_extra_qos ? "extra" : "normal");
+				ctx->last_framerate != ctx->framerate) {
+			mfc_debug(2, "fps changed: %d -> %d\n",
+					ctx->framerate, ctx->last_framerate);
 			ctx->framerate = ctx->last_framerate;
 			s5p_mfc_qos_on(ctx);
 		}
@@ -1822,7 +1830,7 @@ static int vidioc_streamoff(struct file *file, void *priv,
 	} else if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		ret = vb2_streamoff(&ctx->vq_dst, type);
 		if (!ret) {
-			if (!ctx->use_extra_qos)
+			if (!(ctx->buf_process_type & MFCBUFPROC_COPY))
 				s5p_mfc_qos_off(ctx);
 		}
 	} else {
@@ -2141,16 +2149,8 @@ static int vidioc_s_ctrl(struct file *file, void *priv,
 	case V4L2_CID_MPEG_VIDEO_QOS_RATIO:
 		if (ctrl->value > 150)
 			ctrl->value = 1000;
-		if (ctrl->value == 0) {
-			ctrl->value = 100;
-			ctx->use_extra_qos = 1;
-			mfc_info_ctx("QOS_RATIO is 0, use extra qos!\n");
-		} else {
-			ctx->use_extra_qos = 0;
-			mfc_info_ctx("QOS_RATIO is %d, use normal qos!\n", ctrl->value);
-		}
+		mfc_info_ctx("set %d qos_ratio.\n", ctrl->value);
 		ctx->qos_ratio = ctrl->value;
-		ctx->qos_changed = 1;
 		break;
 	case V4L2_CID_MPEG_MFC_SET_DYNAMIC_DPB_MODE:
 		if (FW_HAS_DYNAMIC_DPB(dev))
@@ -2164,6 +2164,9 @@ static int vidioc_s_ctrl(struct file *file, void *priv,
 			dec->sh_handle.fd = -1;
 			return -EINVAL;
 		}
+		break;
+	case V4L2_CID_MPEG_MFC_SET_BUF_PROCESS_TYPE:
+		ctx->buf_process_type = ctrl->value;
 		break;
 	default:
 		list_for_each_entry(ctx_ctrl, &ctx->ctrls, list) {
@@ -2728,6 +2731,7 @@ static int s5p_mfc_stop_streaming(struct vb2_queue *q)
 		if (s5p_mfc_wait_for_done_ctx(ctx,
 				S5P_FIMV_R2H_CMD_FRAME_DONE_RET))
 			s5p_mfc_cleanup_timeout(ctx);
+
 		if (on_res_change(ctx))
 			mfc_debug(2, "stop on res change(state:%d)\n", ctx->state);
 		else
