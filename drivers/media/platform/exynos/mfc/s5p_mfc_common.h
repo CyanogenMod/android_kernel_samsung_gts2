@@ -44,7 +44,7 @@
 #define MFC_MAX_DPBS		32
 #define MFC_INFO_INIT_FD	-1
 
-#define MFC_NUM_CONTEXTS	32
+#define MFC_NUM_CONTEXTS	16
 #define MFC_MAX_DRM_CTX		2
 /* Interrupt timeout */
 #define MFC_INT_TIMEOUT		2000
@@ -774,7 +774,7 @@ struct s5p_mfc_enc {
 		unsigned int bits;
 	} slice_size;
 	unsigned int in_slice;
-	unsigned int buf_full;
+    unsigned int buf_full;
 
 	int stored_tag;
 	struct mfc_user_shared_handle sh_handle;
@@ -870,7 +870,7 @@ struct s5p_mfc_ctx {
 	struct list_head qos_list;
 #endif
 	int qos_ratio;
-	int qos_changed;
+    int qos_changed;
 	int framerate;
 	int last_framerate;
 	int avg_framerate;
@@ -880,7 +880,7 @@ struct s5p_mfc_ctx {
 	int qp_max_change;
 
 	int is_max_fps;
-	int use_extra_qos;
+	int use_extra_qos;;
 
 	struct mfc_timestamp ts_array[MFC_TIME_INDEX];
 	struct list_head ts_list;
@@ -1029,13 +1029,6 @@ static inline unsigned int mfc_version(struct s5p_mfc_dev *dev)
 #define not_coded_cond(ctx)	is_mpeg4vc1(ctx)
 #define on_res_change(ctx)	((ctx)->state >= MFCINST_RES_CHANGE_INIT &&	\
 				 (ctx)->state <= MFCINST_RES_CHANGE_END)
-#define need_to_wait_frame_start(ctx)		\
-	(((ctx->state == MFCINST_FINISHING) ||	\
-	  (ctx->state == MFCINST_RUNNING)) &&	\
-	 test_bit(ctx->num, &ctx->dev->hw_lock))
-#define need_to_wait_nal_abort(ctx)		 \
-	(((ctx->state == MFCINST_ABORT_INST)) && \
-	 test_bit(ctx->num, &ctx->dev->hw_lock))
 
 /* Extra information for Decoder */
 #define	DEC_SET_DUAL_DPB		(1 << 0)
@@ -1093,9 +1086,6 @@ int s5p_mfc_dec_ctx_ready(struct s5p_mfc_ctx *ctx);
 int s5p_mfc_enc_ctx_ready(struct s5p_mfc_ctx *ctx);
 int s5p_mfc_request_sec_pgtable(struct s5p_mfc_dev *dev);
 int s5p_mfc_release_sec_pgtable(struct s5p_mfc_dev *dev);
-#if defined(CONFIG_SOC_EXYNOS5433)
-int s5p_mfc_check_hw_state(struct s5p_mfc_dev *dev);
-#endif
 
 static inline int s5p_mfc_ctx_ready(struct s5p_mfc_ctx *ctx)
 {

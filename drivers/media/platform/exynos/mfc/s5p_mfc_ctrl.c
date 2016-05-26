@@ -401,14 +401,9 @@ int mfc_init_hw(struct s5p_mfc_dev *dev, enum mfc_buf_usage_type buf_type)
 	}
 	mfc_debug(2, "Ok, now will write a command to init the system\n");
 	if (s5p_mfc_wait_for_done_dev(dev, S5P_FIMV_R2H_CMD_SYS_INIT_RET)) {
-		mfc_err_dev("Failed to SYS_INIT\n");
-#if defined(CONFIG_SOC_EXYNOS5433)
-		s5p_mfc_check_hw_state(dev);
-		BUG();
-#else
+		mfc_err_dev("Failed to load firmware\n");
 		ret = -EIO;
 		goto err_init_hw;
-#endif
 	}
 
 	dev->int_cond = 0;
@@ -460,10 +455,8 @@ int mfc_init_hw(struct s5p_mfc_dev *dev, enum mfc_buf_usage_type buf_type)
 			s5p_mfc_clock_off(dev);
 			dev->curr_ctx_drm = curr_ctx_backup;
 			s5p_mfc_clock_on_with_base(dev, MFCBUF_NORMAL);
-		} else if (buf_type == MFCBUF_NORMAL) {
-			s5p_mfc_clock_off(dev);
-			dev->curr_ctx_drm = 1;
-			s5p_mfc_clock_on_with_base(dev, MFCBUF_DRM);
+		} else if (buf_type == MFCBUF_NORMAL && curr_ctx_backup) {
+			s5p_mfc_init_memctrl(dev, MFCBUF_DRM);
 		}
 	}
 #endif
@@ -481,10 +474,6 @@ int s5p_mfc_init_hw(struct s5p_mfc_dev *dev)
 {
 	int ret;
 
-/*
- * mfc_init_hw(NORMAL) has to be called in advance of mfc_init_hw(DRM).
- * Because the base address is changed to DRM in the end of mfc_init_hw(NORMAL).
- */
 	ret = mfc_init_hw(dev, MFCBUF_NORMAL);
 	if (ret)
 		return ret;
@@ -523,7 +512,7 @@ int s5p_mfc_sleep(struct s5p_mfc_dev *dev)
 {
 	struct s5p_mfc_ctx *ctx;
 	int ret;
-	int old_state,i;
+	int old_state;
 
 	mfc_debug_enter();
 
@@ -534,19 +523,8 @@ int s5p_mfc_sleep(struct s5p_mfc_dev *dev)
 
 	ctx = dev->ctx[dev->curr_ctx];
 	if (!ctx) {
-		for (i = 0; i < MFC_NUM_CONTEXTS; i++) {
-			if (dev->ctx[i]) {
-				ctx = dev->ctx[i];
-				break;
-			}
-		}
-		if (!ctx) {
-			mfc_err("no mfc context to run\n");
-			return -EINVAL;
-		} else {
-			dev->curr_ctx = ctx->num;
-			dev->curr_ctx_drm = ctx->is_drm;
-		}
+		mfc_err("no mfc context to run\n");
+		return -EINVAL;
 	}
 	old_state = ctx->state;
 	ctx->state = MFCINST_ABORT;
@@ -599,7 +577,6 @@ err_mfc_sleep:
 		}
 	}
 
-
 	mfc_debug_leave();
 
 	return ret;
@@ -607,7 +584,7 @@ err_mfc_sleep:
 
 int s5p_mfc_wakeup(struct s5p_mfc_dev *dev)
 {
-	enum mfc_buf_usage_type buf_type;
+	enum mfc_buf_usage_type buf_type;	
 	int ret;
 
 	mfc_debug_enter();
