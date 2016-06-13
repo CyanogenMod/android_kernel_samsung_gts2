@@ -784,6 +784,8 @@ static int sec_chg_get_property(struct power_supply *psy,
 		case POWER_SUPPLY_PROP_CURRENT_MAX:
 			sm5703_test_read(charger->sm5703->i2c_client);
 			val->intval = sm5703_get_fast_charging_current(charger->sm5703->i2c_client);
+            // AOSP expects microamperes
+            val->intval *= 1000;
 			break;
 		case POWER_SUPPLY_PROP_CURRENT_AVG:
 			break;
@@ -791,6 +793,8 @@ static int sec_chg_get_property(struct power_supply *psy,
 			if (charger->charging_current) {
 				aicr = sm5703_get_input_current_limit(charger->sm5703->i2c_client);
 				chg_curr = sm5703_get_fast_charging_current(charger->sm5703->i2c_client);
+                // AOSP expects microamperes
+                chg_curr *= 1000;
 				val->intval = MINVAL(aicr, chg_curr);
 			} else
 				val->intval = 0;
