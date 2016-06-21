@@ -1377,6 +1377,8 @@ struct synaptics_rmi4_data {
 	struct synaptics_finger finger[MAX_NUMBER_OF_FINGERS];
 
 	unsigned char button_0d_enabled;
+	unsigned char wake_gesture_enabled;
+	bool screen_off;
 	unsigned char full_pm_cycle;
 	unsigned char num_of_rx;
 	unsigned char num_of_tx;

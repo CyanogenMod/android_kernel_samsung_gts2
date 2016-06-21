@@ -105,7 +105,11 @@ static ssize_t synaptics_rmi4_0dbutton_show(struct device *dev,
 static ssize_t synaptics_rmi4_0dbutton_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count);
 
+static ssize_t synaptics_rmi4_wake_gesture_show(struct device *dev,
+		struct device_attribute *attr, char *buf);
 
+static ssize_t synaptics_rmi4_wake_gesture_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count);
 
 #ifdef CONFIG_HAS_EARLYSUSPEND
 static DEVICE_ATTR(full_pm_cycle, (S_IRUGO | S_IWUSR | S_IWGRP),
@@ -120,6 +124,8 @@ static DEVICE_ATTR(productinfo, S_IRUGO, synaptics_rmi4_f01_productinfo_show, NU
 static DEVICE_ATTR(buildid, S_IRUGO, synaptics_rmi4_f01_buildid_show, NULL);
 static DEVICE_ATTR(flashprog, S_IRUGO, synaptics_rmi4_f01_flashprog_show, NULL);
 static DEVICE_ATTR(0dbutton, (S_IRUGO | S_IWUSR | S_IWGRP), synaptics_rmi4_0dbutton_show, synaptics_rmi4_0dbutton_store);
+static DEVICE_ATTR(wake_gesture, (S_IRUGO | S_IWUSR | S_IWGRP), synaptics_rmi4_wake_gesture_show,
+    synaptics_rmi4_wake_gesture_store);
 
 static struct attribute *attrs[] = {
 #ifdef CONFIG_HAS_EARLYSUSPEND
@@ -133,6 +139,7 @@ static struct attribute *attrs[] = {
 	&dev_attr_buildid.attr,
 	&dev_attr_flashprog.attr,
 	&dev_attr_0dbutton.attr,
+    &dev_attr_wake_gesture.attr,
 	NULL,
 };
 
@@ -410,6 +417,33 @@ static ssize_t synaptics_rmi4_0dbutton_store(struct device *dev,
 	}
 
 	rmi4_data->button_0d_enabled = input;
+
+	return count;
+}
+
+static ssize_t synaptics_rmi4_wake_gesture_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct synaptics_rmi4_data *rmi4_data = dev_get_drvdata(dev);
+
+	return snprintf(buf, PAGE_SIZE, "%u\n",
+			rmi4_data->wake_gesture_enabled);
+}
+
+static ssize_t synaptics_rmi4_wake_gesture_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	//int retval;
+	unsigned int wake_gesture;
+	struct synaptics_rmi4_data *rmi4_data = dev_get_drvdata(dev);
+
+	if (sscanf(buf, "%u", &wake_gesture) != 1)
+		return -EINVAL;
+
+	if (wake_gesture > 1)
+		return -EINVAL;
+
+	rmi4_data->wake_gesture_enabled = wake_gesture;
 
 	return count;
 }
@@ -908,6 +942,7 @@ static int synaptics_rmi4_f12_abs_report(struct synaptics_rmi4_data *rmi4_data,
 #ifdef PRINT_DEBUG_INFO
 	bool print_debug_info = false;
 #endif
+    static unsigned long oldJiffies = 0;
 
 	fingers_to_process = fhandler->num_of_data_points;
 	data_addr = fhandler->full_addr.data_base;
@@ -1129,6 +1164,27 @@ static int synaptics_rmi4_f12_abs_report(struct synaptics_rmi4_data *rmi4_data,
 	if (!touch_count)
 		input_booster_send_event(BOOSTER_DEVICE_TOUCH, BOOSTER_MODE_OFF);
 #endif
+
+	// For dt2w
+	if (rmi4_data->wake_gesture_enabled == 1
+			&& rmi4_data->screen_off
+			&& touch_count == 1 && new_finger_pressed) {
+		unsigned long newJiffies = jiffies;
+
+		if ((newJiffies - oldJiffies) < 50) {
+
+			tsp_debug_info(true, &rmi4_data->i2c_client->dev,
+					"[%d][W] Wake gesture\n", finger);
+
+			input_report_key(rmi4_data->input_dev, KEY_POWER, 1);
+			input_sync(rmi4_data->input_dev);
+			msleep(10);
+			input_report_key(rmi4_data->input_dev, KEY_POWER, 0);
+			input_sync(rmi4_data->input_dev);
+		}
+		oldJiffies = newJiffies;
+	}
+
 	return touch_count;
 }
 
@@ -3208,6 +3264,8 @@ static int synaptics_rmi4_set_input_device(struct synaptics_rmi4_data *rmi4_data
 	set_bit(EV_ABS, rmi4_data->input_dev->evbit);
 	set_bit(BTN_TOUCH, rmi4_data->input_dev->keybit);
 	set_bit(BTN_TOOL_FINGER, rmi4_data->input_dev->keybit);
+    // For dt2w
+    set_bit(KEY_POWER, rmi4_data->input_dev->keybit);
 
 	input_set_abs_params(rmi4_data->input_dev,
 			ABS_MT_POSITION_X, 0,
@@ -3879,6 +3937,8 @@ static int synaptics_rmi4_setup_drv_data(struct i2c_client *client)
 	rmi4_data->wake_device = synaptics_rmi4_sensor_wake;
 #endif
 	rmi4_data->irq = rmi4_data->i2c_client->irq;
+    rmi4_data->wake_gesture_enabled = 0;
+    rmi4_data->screen_off = false;
 
 	/* To prevent input device is set up with defective values */
 	rmi4_data->sensor_max_x = rmi4_data->board->sensor_max_x;
@@ -4258,6 +4318,11 @@ static int synaptics_rmi4_stop_device(struct synaptics_rmi4_data *rmi4_data)
 {
 	const struct synaptics_rmi4_platform_data *pdata = rmi4_data->board;
 
+	if (rmi4_data->wake_gesture_enabled == 1) {
+		rmi4_data->screen_off = true;
+		return 0;
+	}
+
 	mutex_lock(&rmi4_data->rmi4_device_mutex);
 
 	if (rmi4_data->touch_stopped) {
@@ -4287,6 +4352,8 @@ static int synaptics_rmi4_start_device(struct synaptics_rmi4_data *rmi4_data)
 {
 	int retval = 0;
 	const struct synaptics_rmi4_platform_data *pdata = rmi4_data->board;
+
+	rmi4_data->screen_off = false;
 
 	mutex_lock(&rmi4_data->rmi4_device_mutex);
 
