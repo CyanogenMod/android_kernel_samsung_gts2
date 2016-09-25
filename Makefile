@@ -343,7 +343,11 @@ PERL		= perl
 CHECK		= sparse
 
 ifeq ($(CONFIG_CRYPTO_FIPS),)
-READELF	= $(CROSS_COMPILE)readelf
+CURRENT_READELF	= $(CROSS_COMPILE)readelf
+READELF		= $(CURRENT_READELF)
+ifneq (,$(findstring arm-linux-androidkernel,$(CURRENT_READELF)))
+  READELF	= $(subst arm-linux-androidkernel,arm-linux-androideabi,$(CURRENT_READELF))
+endif
 export READELF
 endif
 
