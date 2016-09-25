@@ -344,7 +344,11 @@ CHECK		= sparse
 
 ifeq ($(CONFIG_CRYPTO_FIPS),)
 READELF	= $(CROSS_COMPILE)readelf
-export READELF
+ACTUAL_READELF 	= $(READELF)
+ifneq (,$(findstring arm-linux-androidkernel,$(READELF)))
+  ACTUAL_READELF = $(subst arm-linux-androidkernel,arm-linux-androideabi,$(READELF))
+endif
+export ACTUAL_READELF
 endif
 
 CHECKFLAGS     := -D__linux__ -Dlinux -D__STDC__ -Dunix -D__unix__ \
