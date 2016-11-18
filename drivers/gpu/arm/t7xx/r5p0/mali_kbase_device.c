@@ -518,7 +518,7 @@ STATIC mali_error kbasep_trace_init(struct kbase_device *kbdev)
 
 STATIC void kbasep_trace_term(struct kbase_device *kbdev)
 {
-#ifndef CONFIG_MALI_EXYNOS_TRACE /* MALI_SEC */
+#ifdef CONFIG_MALI_EXYNOS_TRACE /* MALI_SEC */
 	kbasep_trace_debugfs_term(kbdev);
 	kfree(kbdev->trace_rbuf);
 #endif
