@@ -38,6 +38,7 @@
 #ifdef CONFIG_SEC_DEBUG
 #include <linux/sec_debug.h>
 #endif
+
 static const char *handler[]= {
 	"prefetch abort",
 	"data abort",
